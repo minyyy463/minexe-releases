@@ -1,0 +1,54 @@
+name: Build update manifest
+
+# Whenever you publish (or edit) a Release, regenerate latest.json from the
+# newest release's .exe asset: version = tag (minus leading v), sha256 =
+# hash of the asset, url = the public download URL. Clients read latest.json
+# and silently self-update to the matching, hash-verified build.
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate latest.json from newest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          rel="$(gh api "repos/$REPO/releases/latest")"
+          tag="$(echo "$rel" | jq -r '.tag_name')"
+          ver="${tag#v}"
+          asset_url="$(echo "$rel" | jq -r '[.assets[] | select(.name|ascii_downcase|endswith(".exe"))][0].browser_download_url')"
+          asset_name="$(echo "$rel" | jq -r '[.assets[] | select(.name|ascii_downcase|endswith(".exe"))][0].name')"
+          if [ -z "$asset_url" ] || [ "$asset_url" = "null" ]; then
+            echo "::error::No .exe asset found on the latest release ($tag)"; exit 1
+          fi
+          echo "tag=$tag ver=$ver asset=$asset_name"
+          curl -fsSL -o build.exe "$asset_url"
+          sha="$(sha256sum build.exe | awk '{print $1}')"
+          rm -f build.exe
+          jq -n --arg v "$ver" --arg t "$tag" --arg s "$sha" --arg u "$asset_url" \
+            '{version:$v, tag:$t, sha256:$s, url:$u}' > latest.json
+          echo "--- latest.json ---"; cat latest.json
+
+      - name: Commit latest.json if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- latest.json; then
+            echo "latest.json unchanged; nothing to commit."; exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add latest.json
+          git commit -m "Update manifest for ${{ github.event.release.tag_name || 'release' }}"
+          git push
